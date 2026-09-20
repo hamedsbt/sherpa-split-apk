@@ -1,3 +1,4 @@
+
 name: Build ttsEngine V2.9
 
 on:
@@ -5,14 +6,14 @@ on:
 
 jobs:
   build:
-    name: Build ARM7 + ARM8
+    name: Build ARM7 and ARM8
     runs-on: ubuntu-latest
 
     steps:
       # ------------------------------------------------------------
-      # 1. Clone V2.9
+      # Clone the V2.9 tag
       # ------------------------------------------------------------
-      - name: Clone ttsEngine V2.9
+      - name: Checkout ttsEngine V2.9
         uses: actions/checkout@v4
         with:
           repository: woheller69/ttsEngine
@@ -20,7 +21,7 @@ jobs:
           fetch-depth: 1
 
       # ------------------------------------------------------------
-      # 2. Java
+      # Java 17
       # ------------------------------------------------------------
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -29,103 +30,71 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Make gradlew executable
+      - name: Make Gradle executable
         run: chmod +x ./gradlew
 
       # ------------------------------------------------------------
-      # 3. Configure ABI splits
+      # Configure ABI splits
       #
-      # IMPORTANT:
-      # V2.9 already has ndk.abiFilters.
-      #
-      # We remove that configuration because AGP does not allow
-      # ndk abiFilters and splits.abi filters to be configured
-      # simultaneously for the same ABIs.
+      # V2.9 already contains ndk abiFilters.
+      # Remove those filters because AGP rejects having both
+      # ndk.abiFilters and splits.abi filters simultaneously.
       # ------------------------------------------------------------
       - name: Configure ABI splits
+        shell: python
         run: |
-          python3 <<'PY'
           from pathlib import Path
           import re
 
           path = Path("app/build.gradle.kts")
           text = path.read_text()
 
-          print("===== ORIGINAL build.gradle.kts =====")
-          print(text)
-
-          # ----------------------------------------------------------
-          # Remove an existing:
-          #
-          # ndk {
-          #     abiFilters += listOf(...)
-          # }
-          #
-          # block from defaultConfig.
-          #
-          # This is intentionally limited to an ndk block containing
-          # abiFilters so that unrelated Gradle configuration is not
-          # removed.
-          # ----------------------------------------------------------
-
+          # Remove ndk { ... } blocks that contain abiFilters.
           pattern = re.compile(
-              r'''
-              (?P<indent>^[ \t]*)ndk\s*\{\s*
-              (?:
-                  (?!\n[ \t]*\})
-                  .
-              )*?
-              abiFilters\s*(?:\+=|=)\s*
-              [^\n]+
-              \s*
-              \}
-              ''',
-              re.MULTILINE | re.VERBOSE
+              r'(?ms)^[ \t]*ndk\s*\{.*?abiFilters.*?^[ \t]*\}\s*'
           )
 
-          new_text, count = pattern.subn("", text)
+          text, removed = pattern.subn("", text)
 
-          print(f"Removed existing ndk/abiFilters blocks: {count}")
+          print(f"Removed {removed} existing ndk/abiFilters block(s).")
 
-          text = new_text
+          # Make sure there is no remaining abiFilters declaration.
+          if "abiFilters" in text:
+              raise SystemExit(
+                  "ERROR: abiFilters still exists in app/build.gradle.kts"
+              )
 
-          # ----------------------------------------------------------
-          # Locate android { ... } safely by matching braces.
-          # ----------------------------------------------------------
-
+          # Find android {
           android_start = text.find("android {")
 
-          if android_start == -1:
-              raise SystemExit("ERROR: android { block not found")
+          if android_start < 0:
+              raise SystemExit(
+                  "ERROR: android { block not found"
+              )
 
-          brace_start = text.find("{", android_start)
+          # Find the matching closing brace for android {
+          open_brace = text.find("{", android_start)
 
           depth = 0
-          android_end = None
+          close_brace = None
 
-          for i in range(brace_start, len(text)):
-              char = text[i]
-
-              if char == "{":
+          for i in range(open_brace, len(text)):
+              if text[i] == "{":
                   depth += 1
-
-              elif char == "}":
+              elif text[i] == "}":
                   depth -= 1
 
                   if depth == 0:
-                      android_end = i
+                      close_brace = i
                       break
 
-          if android_end is None:
+          if close_brace is None:
               raise SystemExit(
-                  "ERROR: Could not find closing brace of android block"
+                  "ERROR: Could not find end of android { block"
               )
 
-          # ----------------------------------------------------------
-          # Add ABI splits INSIDE android { ... }.
-          # ----------------------------------------------------------
-
-          abi_split = '''
+          # Add ABI splits INSIDE android { ... }
+          abi_split = """
           
               splits {
                   abi {
@@ -135,54 +104,52 @@ jobs:
                       isUniversalApk = false
                   }
               }
-          '''
+          """
 
           text = (
-              text[:android_end]
+              text[:close_brace]
               + abi_split
-              + text[android_end:]
+              + text[close_brace:]
           )
 
           path.write_text(text)
 
           print()
-          print("===== FINAL build.gradle.kts =====")
+          print("===== FINAL app/build.gradle.kts =====")
           print(text)
-          PY
 
       # ------------------------------------------------------------
-      # 4. Verify configuration BEFORE building
+      # Verify Gradle configuration before starting the build
       # ------------------------------------------------------------
-      - name: Verify ABI configuration
+      - name: Verify Gradle configuration
         run: |
-          echo "===== ABI configuration ====="
+          echo "===== ABI split configuration ====="
 
-          grep -n -A10 -B3 "splits" app/build.gradle.kts || true
+          grep -n -A8 -B3 "splits" app/build.gradle.kts
 
           echo
-          echo "===== Checking for ndk abiFilters ====="
+          echo "===== Checking for abiFilters ====="
 
           if grep -n "abiFilters" app/build.gradle.kts; then
-            echo "ERROR: ndk abiFilters is still present."
-            echo "It conflicts with splits.abi in this project."
+            echo "ERROR: abiFilters is still present."
             exit 1
           fi
 
-          echo "OK: no ndk abiFilters remain."
+          echo "Configuration OK."
 
       # ------------------------------------------------------------
-      # 5. Build both APKs
+      # Build
       # ------------------------------------------------------------
       - name: Build release APKs
         run: |
           ./gradlew :app:assembleRelease --no-daemon
 
       # ------------------------------------------------------------
-      # 6. Find generated APKs
+      # Show everything Gradle generated
       # ------------------------------------------------------------
-      - name: Find APKs
+      - name: List generated APKs
         run: |
-          echo "===== Generated APK files ====="
+          echo "===== Generated APKs ====="
 
           find app/build/outputs \
             -type f \
@@ -190,10 +157,12 @@ jobs:
             -print
 
       # ------------------------------------------------------------
-      # 7. Collect ARM7
+      # Prepare artifacts
       # ------------------------------------------------------------
-      - name: Collect ARM7 APK
+      - name: Prepare ARM7 APK
         run: |
+          set -e
+
           mkdir -p artifacts
 
           ARM7=$(find app/build/outputs \
@@ -202,106 +171,96 @@ jobs:
             | head -n 1)
 
           if [ -z "$ARM7" ]; then
-            echo "ERROR: ARM7 APK was not generated."
-            find app/build/outputs -type f -print
+            echo "ERROR: ARM7 APK was not found."
             exit 1
           fi
 
-          echo "ARM7 APK: $ARM7"
+          echo "ARM7: $ARM7"
 
           cp "$ARM7" \
             artifacts/ttsEngine-V2.9-arm7.apk
 
-      # ------------------------------------------------------------
-      # 8. Collect ARM8
-      # ------------------------------------------------------------
-      - name: Collect ARM8 APK
+      - name: Prepare ARM8 APK
         run: |
+          set -e
+
           ARM8=$(find app/build/outputs \
             -type f \
             -name "*arm64-v8a*.apk" \
             | head -n 1)
 
           if [ -z "$ARM8" ]; then
-            echo "ERROR: ARM8 APK was not generated."
-            find app/build/outputs -type f -print
+            echo "ERROR: ARM8 APK was not found."
             exit 1
           fi
 
-          echo "ARM8 APK: $ARM8"
+          echo "ARM8: $ARM8"
 
           cp "$ARM8" \
             artifacts/ttsEngine-V2.9-arm8.apk
 
       # ------------------------------------------------------------
-      # 9. Inspect native libraries
+      # Verify native libraries
       # ------------------------------------------------------------
-      - name: Inspect APK ABIs
-        run: |
-          set -e
-
-          echo "========================================"
-          echo "ARM7 APK"
-          echo "========================================"
-
-          unzip -l artifacts/ttsEngine-V2.9-arm7.apk \
-            | grep '/lib/' || true
-
-          echo
-          echo "========================================"
-          echo "ARM8 APK"
-          echo "========================================"
-
-          unzip -l artifacts/ttsEngine-V2.9-arm8.apk \
-            | grep '/lib/' || true
-
-      # ------------------------------------------------------------
-      # 10. HARD verification
-      #
-      # ARM7 must NOT contain arm64-v8a.
-      # ARM8 must NOT contain armeabi-v7a.
-      # ------------------------------------------------------------
-      - name: Verify APK contents
+      - name: Verify APK ABIs
         run: |
           set -e
 
           ARM7="artifacts/ttsEngine-V2.9-arm7.apk"
           ARM8="artifacts/ttsEngine-V2.9-arm8.apk"
 
-          echo "Checking ARM7..."
+          echo "========================================"
+          echo "ARM7 native libraries"
+          echo "========================================"
 
-          if unzip -l "$ARM7" | grep -q "lib/arm64-v8a/"; then
-            echo "ERROR: ARM7 APK contains arm64-v8a libraries!"
-            exit 1
-          fi
-
-          if ! unzip -l "$ARM7" | grep -q "lib/armeabi-v7a/"; then
-            echo "ERROR: ARM7 APK contains no armeabi-v7a libraries!"
-            exit 1
-          fi
-
-          echo "ARM7 OK."
+          unzip -l "$ARM7" | grep '/lib/' || true
 
           echo
-          echo "Checking ARM8..."
+          echo "========================================"
+          echo "ARM8 native libraries"
+          echo "========================================"
 
-          if unzip -l "$ARM8" | grep -q "lib/armeabi-v7a/"; then
-            echo "ERROR: ARM8 APK contains armeabi-v7a libraries!"
+          unzip -l "$ARM8" | grep '/lib/' || true
+
+          echo
+          echo "========================================"
+          echo "Checking ARM7"
+          echo "========================================"
+
+          if unzip -l "$ARM7" | grep -q 'lib/arm64-v8a/'; then
+            echo "ERROR: ARM7 contains arm64-v8a!"
             exit 1
           fi
 
-          if ! unzip -l "$ARM8" | grep -q "lib/arm64-v8a/"; then
-            echo "ERROR: ARM8 APK contains no arm64-v8a libraries!"
+          if ! unzip -l "$ARM7" | grep -q 'lib/armeabi-v7a/'; then
+            echo "ERROR: ARM7 contains no armeabi-v7a!"
             exit 1
           fi
 
-          echo "ARM8 OK."
+          echo "ARM7 PASSED"
+
+          echo
+          echo "========================================"
+          echo "Checking ARM8"
+          echo "========================================"
+
+          if unzip -l "$ARM8" | grep -q 'lib/armeabi-v7a/'; then
+            echo "ERROR: ARM8 contains armeabi-v7a!"
+            exit 1
+          fi
+
+          if ! unzip -l "$ARM8" | grep -q 'lib/arm64-v8a/'; then
+            echo "ERROR: ARM8 contains no arm64-v8a!"
+            exit 1
+          fi
+
+          echo "ARM8 PASSED"
 
           echo
           echo "ABI verification PASSED."
 
       # ------------------------------------------------------------
-      # 11. Show final sizes
+      # Show final sizes
       # ------------------------------------------------------------
       - name: Show final APK sizes
         run: |
@@ -309,19 +268,18 @@ jobs:
           ls -lh artifacts/
 
       # ------------------------------------------------------------
-      # 12. Upload ARM7
+      # Upload ARM7
       # ------------------------------------------------------------
-      - name: Upload ARM7
+      - name: Upload ARM7 APK
         uses: actions/upload-artifact@v4
         with:
           name: ttsEngine-V2.9-arm7
           path: artifacts/ttsEngine-V2.9-arm7.apk
 
       # ------------------------------------------------------------
-      # 13. Upload ARM8
+      # Upload ARM8
       # ------------------------------------------------------------
-      - name: Upload ARM8
-      - name: Upload ARM8
+      - name: Upload ARM8 APK
         uses: actions/upload-artifact@v4
         with:
           name: ttsEngine-V2.9-arm8
