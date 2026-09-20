@@ -31,40 +31,67 @@ jobs:
       #   arm64-v8a
       #
       # No universal APK.
+
       - name: Configure ABI splits
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           path = Path("app/build.gradle.kts")
           text = path.read_text()
 
-          abi_splits = r'''
-          splits {
-              abi {
-                  isEnable = true
-                  reset()
-                  include("armeabi-v7a", "arm64-v8a")
-                  isUniversalApk = false
+          if "isUniversalApk" in text:
+              print("ABI splits already configured")
+              print(text)
+              raise SystemExit(0)
+
+          # Find the android { block.
+          android_start = text.find("android {")
+
+          if android_start == -1:
+              raise SystemExit("ERROR: android { block not found")
+
+          # Find the matching closing brace for android {.
+          brace_start = text.find("{", android_start)
+
+          depth = 0
+          android_end = None
+
+          for i in range(brace_start, len(text)):
+              if text[i] == "{":
+                  depth += 1
+              elif text[i] == "}":
+                  depth -= 1
+
+                  if depth == 0:
+                      android_end = i
+                      break
+
+          if android_end is None:
+              raise SystemExit("ERROR: Could not find end of android { block")
+
+          abi_splits = '''
+          
+              splits {
+                  abi {
+                      isEnable = true
+                      reset()
+                      include("armeabi-v7a", "arm64-v8a")
+                      isUniversalApk = false
+                  }
               }
-          }
           '''
 
-          # Don't accidentally add it twice.
-          if "isUniversalApk" not in text:
-              # Insert before the final android { } closing brace.
-              # This works for the normal Kotlin Android Gradle layout.
-              pos = text.rfind("}")
+          text = (
+              text[:android_end]
+              + abi_splits
+              + text[android_end:]
+          )
 
-              if pos == -1:
-                  raise SystemExit("Could not find end of build.gradle.kts")
+          path.write_text(text)
 
-              text = text[:pos] + abi_splits + "\n" + text[pos:]
-              path.write_text(text)
-
-          print("===== app/build.gradle.kts =====")
-          print(path.read_text())
+          print("===== Modified app/build.gradle.kts =====")
+          print(text)
           PY
 
       - name: Build release APKs
