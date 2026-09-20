@@ -1,4 +1,3 @@
-
 name: Build ttsEngine V2.9
 
 on:
@@ -6,17 +5,8 @@ on:
 
 jobs:
   build:
-    name: Build ${{ matrix.name }}
+    name: Build ARM7 + ARM8
     runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - abi: armeabi-v7a
-            name: arm7
-          - abi: arm64-v8a
-            name: arm8
 
     steps:
       - name: Clone ttsEngine V2.9
@@ -36,87 +26,126 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      # Add the ABI filter to the upstream project.
-      # This makes the APK contain ONLY the requested ABI.
-      - name: Configure ABI
-        env:
-          ABI: ${{ matrix.abi }}
+      # Configure Gradle to generate ONLY:
+      #   armeabi-v7a
+      #   arm64-v8a
+      #
+      # No universal APK.
+      - name: Configure ABI splits
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import os
           import re
 
           path = Path("app/build.gradle.kts")
           text = path.read_text()
 
-          abi = os.environ["ABI"]
+          abi_splits = r'''
+          splits {
+              abi {
+                  isEnable = true
+                  reset()
+                  include("armeabi-v7a", "arm64-v8a")
+                  isUniversalApk = false
+              }
+          }
+          '''
 
-          # Add ndk { abiFilters += "$ABI" } inside defaultConfig.
-          if 'abiFilters' not in text:
-              pattern = r'(defaultConfig\s*\{)'
-              replacement = (
-                  r'\1\n'
-                  f'        ndk {{ abiFilters += "{abi}" }}'
-              )
+          # Don't accidentally add it twice.
+          if "isUniversalApk" not in text:
+              # Insert before the final android { } closing brace.
+              # This works for the normal Kotlin Android Gradle layout.
+              pos = text.rfind("}")
 
-              new_text, count = re.subn(
-                  pattern,
-                  replacement,
-                  text,
-                  count=1
-              )
+              if pos == -1:
+                  raise SystemExit("Could not find end of build.gradle.kts")
 
-              if count != 1:
-                  print("Could not find defaultConfig in app/build.gradle.kts")
-                  print(text)
-                  raise SystemExit(1)
+              text = text[:pos] + abi_splits + "\n" + text[pos:]
+              path.write_text(text)
 
-              path.write_text(new_text)
-
-          print("Configured ABI:", abi)
+          print("===== app/build.gradle.kts =====")
           print(path.read_text())
           PY
 
-      - name: Build release APK
+      - name: Build release APKs
         run: |
           ./gradlew :app:assembleRelease --no-daemon
 
-      - name: Show generated files
+      - name: Show APK contents
         run: |
-          echo "=== APK files ==="
-          find . -type f -name "*.apk" -print
+          echo "===== APK files ====="
+          find app/build/outputs -type f -name "*.apk" -print
 
-          echo "=== Build outputs ==="
-          find app/build/outputs -type f -print || true
+          echo
+          echo "===== APK native libraries ====="
 
-      - name: Collect APK
-        env:
-          ABI: ${{ matrix.abi }}
-          NAME: ${{ matrix.name }}
+          for apk in $(find app/build/outputs -type f -name "*.apk"); do
+            echo
+            echo "----------------------------------------"
+            echo "$apk"
+            echo "----------------------------------------"
+            unzip -l "$apk" | grep '/lib/' || true
+          done
+
+      - name: Collect ARM7 APK
         run: |
           mkdir -p artifacts
 
-          APK=$(find app/build/outputs -type f -name "*.apk" | head -n 1)
+          ARM7=$(find app/build/outputs -type f -name "*armeabi-v7a*.apk" | head -n 1)
 
-          if [ -z "$APK" ]; then
-            echo "ERROR: No APK was generated."
-            echo
-            echo "Complete output tree:"
-            find app/build -type f | sort
+          if [ -z "$ARM7" ]; then
+            echo "ERROR: ARM7 APK not found"
             exit 1
           fi
 
-          echo "Found APK: $APK"
+          cp "$ARM7" artifacts/ttsEngine-V2.9-arm7.apk
 
-          cp "$APK" "artifacts/ttsEngine-V2.9-${NAME}.apk"
+      - name: Collect ARM8 APK
+        run: |
+          ARM8=$(find app/build/outputs -type f -name "*arm64-v8a*.apk" | head -n 1)
 
-          echo
-          echo "Final artifact:"
-          ls -lh "artifacts/ttsEngine-V2.9-${NAME}.apk"
+          if [ -z "$ARM8" ]; then
+            echo "ERROR: ARM8 APK not found"
+            exit 1
+          fi
 
-      - name: Upload ${{ matrix.name }} APK
+          cp "$ARM8" artifacts/ttsEngine-V2.9-arm8.apk
+
+      # Verify that ARM7 contains no ARM8 libraries.
+      - name: Verify ARM7 APK
+        run: |
+          echo "===== ARM7 ====="
+          unzip -l artifacts/ttsEngine-V2.9-arm7.apk | grep '/lib/' || true
+
+          if unzip -l artifacts/ttsEngine-V2.9-arm7.apk | grep -q 'lib/arm64-v8a/'; then
+            echo "ERROR: ARM7 APK contains arm64-v8a libraries"
+            exit 1
+          fi
+
+      # Verify that ARM8 contains no ARM7 libraries.
+      - name: Verify ARM8 APK
+        run: |
+          echo "===== ARM8 ====="
+          unzip -l artifacts/ttsEngine-V2.9-arm8.apk | grep '/lib/' || true
+
+          if unzip -l artifacts/ttsEngine-V2.9-arm8.apk | grep -q 'lib/armeabi-v7a/'; then
+            echo "ERROR: ARM8 APK contains armeabi-v7a libraries"
+            exit 1
+          fi
+
+      - name: Show final APK sizes
+        run: |
+          echo "===== Final APKs ====="
+          ls -lh artifacts/
+
+      - name: Upload ARM7 APK
         uses: actions/upload-artifact@v4
         with:
-          name: ttsEngine-V2.9-${{ matrix.name }}
-          path: artifacts/ttsEngine-V2.9-${{ matrix.name }}.apk
+          name: ttsEngine-V2.9-arm7
+          path: artifacts/ttsEngine-V2.9-arm7.apk
+
+      - name: Upload ARM8 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ttsEngine-V2.9-arm8
+          path: artifacts/ttsEngine-V2.9-arm8.apk
