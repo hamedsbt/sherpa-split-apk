@@ -1,14 +1,12 @@
+
 name: Build ttsEngine V2.9
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
   build:
-    name: Build ${{ matrix.abi }}
+    name: Build ${{ matrix.name }}
     runs-on: ubuntu-latest
 
     strategy:
@@ -21,7 +19,6 @@ jobs:
             name: arm8
 
     steps:
-      # 1. Clone V2.9
       - name: Clone ttsEngine V2.9
         uses: actions/checkout@v4
         with:
@@ -29,7 +26,6 @@ jobs:
           ref: V2.9
           fetch-depth: 1
 
-      # 2. Install Java
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -37,36 +33,88 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      # 3. Make Gradle executable
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      # 4. Build only the selected ABI
-      - name: Build ${{ matrix.name }}
+      # Add the ABI filter to the upstream project.
+      # This makes the APK contain ONLY the requested ABI.
+      - name: Configure ABI
+        env:
+          ABI: ${{ matrix.abi }}
         run: |
-          ./gradlew :app:assembleRelease \
-            -Pandroid.injected.build.abi=${{ matrix.abi }}
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
 
-      # 5. Find generated APK
-      - name: List build output
+          path = Path("app/build.gradle.kts")
+          text = path.read_text()
+
+          abi = os.environ["ABI"]
+
+          # Add ndk { abiFilters += "$ABI" } inside defaultConfig.
+          if 'abiFilters' not in text:
+              pattern = r'(defaultConfig\s*\{)'
+              replacement = (
+                  r'\1\n'
+                  f'        ndk {{ abiFilters += "{abi}" }}'
+              )
+
+              new_text, count = re.subn(
+                  pattern,
+                  replacement,
+                  text,
+                  count=1
+              )
+
+              if count != 1:
+                  print("Could not find defaultConfig in app/build.gradle.kts")
+                  print(text)
+                  raise SystemExit(1)
+
+              path.write_text(new_text)
+
+          print("Configured ABI:", abi)
+          print(path.read_text())
+          PY
+
+      - name: Build release APK
         run: |
-          find app/build/outputs -type f -name "*.apk" -print
+          ./gradlew :app:assembleRelease --no-daemon
 
-      # 6. Rename APK
-      - name: Rename APK
+      - name: Show generated files
+        run: |
+          echo "=== APK files ==="
+          find . -type f -name "*.apk" -print
+
+          echo "=== Build outputs ==="
+          find app/build/outputs -type f -print || true
+
+      - name: Collect APK
+        env:
+          ABI: ${{ matrix.abi }}
+          NAME: ${{ matrix.name }}
         run: |
           mkdir -p artifacts
 
-          APK=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
+          APK=$(find app/build/outputs -type f -name "*.apk" | head -n 1)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK was not generated"
+            echo "ERROR: No APK was generated."
+            echo
+            echo "Complete output tree:"
+            find app/build -type f | sort
             exit 1
           fi
 
-          cp "$APK" "artifacts/ttsEngine-V2.9-${{ matrix.name }}.apk"
+          echo "Found APK: $APK"
 
-      # 7. Upload APK
+          cp "$APK" "artifacts/ttsEngine-V2.9-${NAME}.apk"
+
+          echo
+          echo "Final artifact:"
+          ls -lh "artifacts/ttsEngine-V2.9-${NAME}.apk"
+
       - name: Upload ${{ matrix.name }} APK
         uses: actions/upload-artifact@v4
         with:
